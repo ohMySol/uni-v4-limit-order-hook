@@ -4,3 +4,5 @@ out = "out"
 libs = ["lib"]
 
 optimizer_runs = 800
+
+ignored_error_codes = [5667] # unused-param
