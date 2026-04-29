@@ -114,7 +114,23 @@ contract LimitOrder is BaseHook, ILimitOrder {
         int24 tickLower, 
         bool zeroForOne,
         uint128 liquidity
-    ) external payable {}
+    ) external payable {
+        if (tickLower % poolKey.tickSpacing != 0) revert ErrorsLib.LimitOrder_InvalidTickLower();
+        if (liquidity == 0) revert ErrorsLib.LimitOrder_MissingLiquidity();
+
+        poolManager.unlock(
+            abi.encode(
+                msg.sender,
+                msg.value,
+                poolKey,
+                tickLower,
+                zeroForOne,
+                liquidity
+            )
+        );
+
+
+    }
 
     /// @inheritdoc ILimitOrder
     function cancelLimitOrder(
@@ -130,4 +146,11 @@ contract LimitOrder is BaseHook, ILimitOrder {
         bool zeroForOne,
         uint256 slot
     ) external {}
+
+    /* EXTERNAL GETTER FUNCTIONS */
+
+    /// @inheritdoc ILimitOrder
+    function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) external pure returns (bytes32) {
+        return keccak256(abi.encode(PoolId.unwrap(poolId), tick, zeroForOne));
+    }
 }

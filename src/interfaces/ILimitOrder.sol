@@ -5,6 +5,8 @@ import {PoolId} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 
 /// @notice A bucket is a structure that holds limit orders of different users for a certain range of ticks
+/// @dev The bucket is identified by the `poolId`, `tick` (lower tick) and `zeroForOne` flag.
+/// A bucket is “filled” when the position has been converted into the output token for that order’s direction.
 /// @param filled Whether the liquidity in the bucket has been filled
 /// @param amount0 The amount of token0 in the bucket 
 /// @param amount1 The amount of token1 in the bucket
@@ -62,7 +64,7 @@ interface ILimitOrder {
     /// @param zeroForOne The direction of the limit order
     function cancelLimitOrder(PoolKey calldata poolKey, int24 tickLower, bool zeroForOne) external;
 
-    /// @notice The function is called by msg.sender to withdraw the swapped tokens after the limit order was executed (filled).
+    /// @notice The function is called by msg.sender to withdraw the swapped tokens after the limit order was executed (filled)
     /// @dev Function gets the bucket (which is already filled) and calculates an amount of tokens to transfer to msg.sender.
     ///
     ///IMPORTANT:
@@ -74,4 +76,14 @@ interface ILimitOrder {
     /// @param zeroForOne The direction of the limit order
     /// @param slot The slot of the bucket
     function take(PoolKey calldata poolKey, int24 tickLower, bool zeroForOne, uint256 slot) external;
+
+    /// @notice Returns the ID of the bucket.
+    /// @dev The bucket ID is a keccak256 hash of `poolId`, `tick`, `zeroForOne`.
+    /// It is used to identify the bucket in the `buckets` mapping.
+    /// 
+    /// @param poolId The ID of the pool where the bucket is located
+    /// @param tick The tick where the bucket is stored. We use the lower tick to identify the bucket
+    /// @param zeroForOne The direction of the limit order (direction of the swap)
+    /// @return The ID of the bucket
+    function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) external pure returns (bytes32);
 }
