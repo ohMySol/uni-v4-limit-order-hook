@@ -182,7 +182,24 @@ contract LimitOrder is BaseHook, ILimitOrder {
             }
 
             return "";
-        } else if (ActionLib.getAction() == ActionLib.CANCEL_LMT_ORDER) {}
+        } else if (ActionLib.getAction() == ActionLib.CANCEL_LMT_ORDER) {
+            (
+                PoolKey memory poolKey,
+                int24 tickLower,
+                uint128 liquidity
+            ) = abi.decode(data, (PoolKey, int24, uint128));
+            
+            (
+                uint256 amount0,
+                uint256 amount1, 
+                uint256 fee0, 
+                uint256 fee1
+            ) = _removeLiquidity(poolKey, tickLower, -int256(uint256(liquidity))); // safe cast
+
+            return abi.encode(amount0, amount1, fee0, fee1);
+        }
+
+        revert ErrorsLib.LimitOrder_InvalidAction();
     }
 
     /* LIMIT ORDER FUNCTIONS */
@@ -310,6 +327,8 @@ contract LimitOrder is BaseHook, ILimitOrder {
         return keccak256(abi.encode(PoolId.unwrap(poolId), tick, zeroForOne));
     }
 
+    /* INTERNAL FUNCTIONS */
+
     /// @notice Accrues pending fees for a user into `userOwed0/1` and resets their fee snapshot.
     /// @dev Must be called before overwriting `userFee0/1` on a re-deposit, otherwise
     /// fees earned between the first and second deposit are lost.
@@ -320,6 +339,51 @@ contract LimitOrder is BaseHook, ILimitOrder {
                 (existingLiquidity * (bucket.feePerLiquidity0 - bucket.userFee0[user])) / 1e18;
             bucket.userOwed1[user] +=
                 (existingLiquidity * (bucket.feePerLiquidity1 - bucket.userFee1[user])) / 1e18;
+        }
+    }
+
+    /// @notice Withdraw liquidity from the `PoolManager` to this hook contract and return the amount of tokens and fees.
+    /// @param poolKey The pool key
+    /// @param tickLower The lower tick of the bucket
+    /// @param liquidity The liquidity to remove
+    /// @return amount0 The amount of token0
+    /// @return amount1 The amount of token1
+    /// @return fee0 The fee of token0
+    /// @return fee1 The fee of token1
+    function _removeLiquidity(
+        PoolKey memory poolKey, 
+        int24 tickLower, 
+        int256 liquidity
+    ) internal returns (
+        uint256 amount0, 
+        uint256 amount1, 
+        uint256 fee0, 
+        uint256 fee1
+    ) {
+        (BalanceDelta delta, BalanceDelta feeDelta) = poolManager.modifyLiquidity({
+            key: poolKey,
+            params: ModifyLiquidityParams({
+                tickLower: tickLower,
+                tickUpper: tickLower + poolKey.tickSpacing,
+                liquidityDelta: liquidity,
+                salt: bytes32(0)
+            }),
+            hookData: ""
+        });
+
+        if (delta.amount0() > 0) {
+            amount0 = uint256(uint128(delta.amount0()));
+            poolManager.take(poolKey.currency0, address(this), amount0);
+        }
+        if (delta.amount1() > 0) {
+            amount1 = uint256(uint128(delta.amount1()));
+            poolManager.take(poolKey.currency1, address(this), amount1);
+        }
+        if (feeDelta.amount0() > 0) {
+            fee0 = uint256(uint128(feeDelta.amount0()));
+        }
+        if (feeDelta.amount1() > 0) {
+            fee1 = uint256(uint128(feeDelta.amount1()));
         }
     }
 }
