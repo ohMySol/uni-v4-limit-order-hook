@@ -152,7 +152,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
             Currency currency;
             uint256 amountToPay;
             // if the order is currency0 --> currency1, the amount0 should be negative and amount1 should be zero,
-            // and vice versa for currency1 --> currency0
+            // and vice versa for currency1 --> currency0. This is because we are adding liquidity out of the current tick.
             if (zeroForOne) {
                 if (amount0 > 0 && amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
                 currency = poolKey.currency0;
@@ -213,8 +213,14 @@ contract LimitOrder is BaseHook, ILimitOrder {
         uint256 slot = slots[bucketId];
         
         Bucket storage bucket = buckets[bucketId][slot];
+
+        _accruePendingFees(bucket, msg.sender);
+
         bucket.liquidity += liquidity;
         bucket.userLiquidity[msg.sender] += liquidity;
+        // snapshot the current fee accumulator, so user doesn't claim pre existent fees
+        bucket.userFee0[msg.sender] = bucket.feePerLiquidity0;
+        bucket.userFee1[msg.sender] = bucket.feePerLiquidity1;
 
         emit EventsLib.LimitOrder_Place(
             msg.sender,
@@ -231,7 +237,63 @@ contract LimitOrder is BaseHook, ILimitOrder {
         PoolKey calldata poolKey, 
         int24 tickLower, 
         bool zeroForOne
-    ) external setAction(ActionLib.CANCEL_LMT_ORDER) {}
+    ) external setAction(ActionLib.CANCEL_LMT_ORDER) {
+        bytes32 bucketId = getBucketId(poolKey.toId(), tickLower, zeroForOne);
+        uint256 slot = slots[bucketId];
+
+        Bucket storage bucket = buckets[bucketId][slot];
+        if (bucket.filled) revert ErrorsLib.LimitOrder_BucketFilled();
+        
+        uint128 userLiquidity = bucket.userLiquidity[msg.sender];
+        if (userLiquidity == 0) revert ErrorsLib.LimitOrder_NoLiquidity();
+
+        bucket.liquidity -= userLiquidity;
+        bucket.userLiquidity[msg.sender] = 0;
+
+        bytes memory res = poolManager.unlock(
+            abi.encode(
+                poolKey,
+                tickLower,
+                userLiquidity
+            )
+        );
+
+        (
+            uint256 amount0, 
+            uint256 amount1, 
+            uint256 fee0, 
+            uint256 fee1
+        ) = abi.decode(res, (uint256, uint256, uint256, uint256));
+
+        // Update cumulative fee per liquidity unit. `userLiquidity` is added to the total bucket liquidity
+        // to calculate fees for the full liquidity before deducting the user's liquidity.
+        bucket.feePerLiquidity0 += (fee0 * 1e18) / (bucket.liquidity + userLiquidity);
+        bucket.feePerLiquidity1 += (fee1 * 1e18) / (bucket.liquidity + userLiquidity);
+        // calculate the user fee share
+        uint256 userFee0 = (userLiquidity * (bucket.feePerLiquidity0 - bucket.userFee0[msg.sender])) / 1e18;
+        uint256 userFee1 = (userLiquidity * (bucket.feePerLiquidity1 - bucket.userFee1[msg.sender])) / 1e18;
+
+        // transfer to user their principal + fee share + previously accrued fees if exists.
+        uint256 payout0 = (amount0 - fee0) + userFee0 + bucket.userOwed0[msg.sender];
+        uint256 payout1 = (amount1 - fee1) + userFee1 + bucket.userOwed1[msg.sender];
+        bucket.userOwed0[msg.sender] = 0;
+        bucket.userOwed1[msg.sender] = 0;
+        
+        if (payout0 > 0) {
+            poolKey.currency0.transfer(msg.sender, payout0);
+        }
+        if (payout1 > 0) {
+            poolKey.currency1.transfer(msg.sender, payout1);
+        }
+
+        emit EventsLib.LimitOrder_Cancel(
+            msg.sender,
+            PoolId.unwrap(poolKey.toId()),
+            slot,
+            tickLower,
+            zeroForOne
+        );
+    }
 
     /// @inheritdoc ILimitOrder
     function take(
@@ -246,5 +308,18 @@ contract LimitOrder is BaseHook, ILimitOrder {
     /// @inheritdoc ILimitOrder
     function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) public pure returns (bytes32) {
         return keccak256(abi.encode(PoolId.unwrap(poolId), tick, zeroForOne));
+    }
+
+    /// @notice Accrues pending fees for a user into `userOwed0/1` and resets their fee snapshot.
+    /// @dev Must be called before overwriting `userFee0/1` on a re-deposit, otherwise
+    /// fees earned between the first and second deposit are lost.
+    function _accruePendingFees(Bucket storage bucket, address user) internal {
+        uint128 existingLiquidity = bucket.userLiquidity[user];
+        if (existingLiquidity > 0) {
+            bucket.userOwed0[user] +=
+                (existingLiquidity * (bucket.feePerLiquidity0 - bucket.userFee0[user])) / 1e18;
+            bucket.userOwed1[user] +=
+                (existingLiquidity * (bucket.feePerLiquidity1 - bucket.userFee1[user])) / 1e18;
+        }
     }
 }

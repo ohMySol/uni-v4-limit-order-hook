@@ -28,4 +28,10 @@ library ErrorsLib {
 
     /// @notice Thrown when the user sent ETH instead of the required currency
     error LimitOrder_EthWasSent();
+
+    /// @notice Thrown when the user has no liquidity in the bucket
+    error LimitOrder_NoLiquidity();
+
+    /// @notice Thrown when the bucket is filled
+    error LimitOrder_BucketFilled();
 }

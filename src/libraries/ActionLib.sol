@@ -15,7 +15,7 @@ library ActionLib {
     bytes32 internal constant SLOT = 0;
 
     /// @notice Returns the action stored in the `SLOT`
-    /// @return The action stored in the `SLOT`
+    /// @return action The action stored in the `SLOT`
     function getAction() internal view returns (uint256 action) {
         assembly {
             action := tload(SLOT)

@@ -6,18 +6,33 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 
 /// @notice A bucket is a structure that holds limit orders of different users for a certain range of ticks
 /// @dev The bucket is identified by the `poolId`, `tick` (lower tick) and `zeroForOne` flag.
-/// A bucket is “filled” when the position has been converted into the output token for that order’s direction.
+/// A bucket is “filled” when the position (liquidity) has been converted into the output token for that order’s direction.
+///
+/// `userOwed0/1` is needed when a user deposits multiple times into the same bucket to avoid losing fees.
+///
 /// @param filled Whether the liquidity in the bucket has been filled
 /// @param amount0 The amount of token0 in the bucket 
 /// @param amount1 The amount of token1 in the bucket
+/// @param feePerLiquidity0 The cumulative fee0 per unit of liquidity (scaled)
+/// @param feePerLiquidity1 The cumulative fee1 per unit of liquidity (scaled)
 /// @param liquidity The total liquidity in the bucket
-/// @param userLiquidity The liquidity of the user in the bucket (user address => liquidity)
+/// @param userLiquidity The liquidity of the user in the bucket
+/// @param userFee0 A snapshot of the `feePerLiquidity0` for the user at the time of place limit order
+/// @param userFee1 A snapshot of the `feePerLiquidity1` for the user at the time of place limit order
+/// @param userOwed0 Accumulated token0 fees owed to the user from previous deposits (accrued before a re-deposit overwrites the snapshot)
+/// @param userOwed1 Accumulated token1 fees owed to the user from previous deposits (accrued before a re-deposit overwrites the snapshot)
 struct Bucket {
     bool filled;
     uint256 amount0;
     uint256 amount1;
+    uint256 feePerLiquidity0;
+    uint256 feePerLiquidity1;
     uint128 liquidity;
     mapping(address => uint128) userLiquidity;
+    mapping(address => uint256) userFee0;
+    mapping(address => uint256) userFee1;
+    mapping(address => uint256) userOwed0;
+    mapping(address => uint256) userOwed1;
 }
 
 /// @title ILimitOrder
