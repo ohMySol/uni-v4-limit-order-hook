@@ -5,4 +5,4 @@ libs = ["lib"]
 
 optimizer_runs = 800
 
-ignored_error_codes = [5667] # unused-param
+ignored_error_codes = [5667, 2072, 6321] # unused-param, unused-local-var, unnamed-return-variable

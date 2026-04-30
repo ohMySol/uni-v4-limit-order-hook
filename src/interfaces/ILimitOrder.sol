@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity 0.8.30;
 
 import {PoolId} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -33,6 +33,19 @@ interface ILimitOrder {
     /// @param bucketId The ID of the bucket
     /// @return The slot of the bucket
     function slots(bytes32 bucketId) external view returns (uint256);
+
+    /// @notice The callback function that is called by the pool manager when the limit order is placed or cancelled
+    /// @dev Function selects which logic to execute based on the action that is stored in the `ActionLib` library.
+    /// - if the action is `ActionLib.PLACE_LMT_ORDER`, the function will place the limit order
+    /// - if the action is `ActionLib.CANCEL_LMT_ORDER`, the function will cancel the limit order
+    /// 
+    ///IMPORTANT:
+    /// - the function should be called by the PoolManager contract
+    /// - the action should be set before calling this function (using the `setAction` modifier)
+    ///
+    /// @param data The data passed to the callback
+    /// @return The data returned by the callback
+    function unlockCallback(bytes calldata data) external returns (bytes memory);
 
     /// @notice Places a limit order for msg.sender 
     /// @dev Function calls `unlock()` on PoolManager which will do a callback to this contract into `unlockCallback()`,
@@ -78,8 +91,14 @@ interface ILimitOrder {
     function take(PoolKey calldata poolKey, int24 tickLower, bool zeroForOne, uint256 slot) external;
 
     /// @notice Returns the ID of the bucket.
-    /// @dev The bucket ID is a keccak256 hash of `poolId`, `tick`, `zeroForOne`.
-    /// It is used to identify the bucket in the `buckets` mapping.
+    /// @dev The bucket ID is a keccak256 hash of `poolId`, `tick` and `zeroForOne`.
+    /// It is used to identify the bucket in the `buckets` mapping and to identify the slot, where the bucket is stored.
+    /// 
+    /// It is worth to mention an importantance of the `zeroForOne` parameter in the bucket identification, because without it 
+    /// you can’t interpret `Bucket.filled` value correctly. If you dont't include `zeroForOne` in the hash, then these 2 cases will collide into the same bucket:
+    /// - bucket for range [tickLower, tickLower + tickSpacing] intended to sell token0
+    /// - bucket for the exact same range intended to sell token1
+    /// So, `zeroForOne` helps to differentiate between these 2 cases.
     /// 
     /// @param poolId The ID of the pool where the bucket is located
     /// @param tick The tick where the bucket is stored. We use the lower tick to identify the bucket

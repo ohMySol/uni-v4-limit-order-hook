@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity 0.8.30;
 
 import {BaseHook} from "v4-hooks-public/src/base/BaseHook.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -10,13 +10,16 @@ import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol"
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
-import {SafeCast} from "v4-core/libraries/SafeCast.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {ILimitOrder, Bucket} from "./interfaces/ILimitOrder.sol";
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {EventsLib} from "./libraries/Events.sol";
 import {ErrorsLib} from "./libraries/Errors.sol";
+import {ActionLib} from "./libraries/ActionLib.sol";
+import {SafeCast} from "./libraries/SafeCast.sol";
+
 
 /// @title Limit Order Hook
 /// @author @ohMySol
@@ -48,6 +51,20 @@ contract LimitOrder is BaseHook, ILimitOrder {
     
     /// @notice The mapping which stores the bucket values
     mapping(bytes32 bucketId => mapping(uint256 slot => Bucket bucket)) public buckets;
+
+    /* MODIFIERS */
+
+    /// @notice Modifier to set the action for the limit order
+    /// @dev Modiifier set `action` to the `ActionLib.SLOT` and reset it to 0 after the function call.
+    /// It is used to identify the action in the `unlockCallback` function. It also works as a reentrancy guard.
+    /// @param action The action to set (ActionLib.PLACE_LMT_ORDER or ActionLib.CANCEL_LMT_ORDER)
+    modifier setAction(uint256 action) {
+        if (ActionLib.getAction() != 0) revert ErrorsLib.LimitOrder_ActionAlreadySet();
+        if (action < 1 || action > 2) revert ErrorsLib.LimitOrder_InvalidAction();
+        ActionLib.setAction(action);
+        _;
+        ActionLib.setAction(0);
+    }
 
     /// @notice Constructor to initialize the hook with the pool manager
     /// @param _poolManager The address of the pool manager
@@ -100,10 +117,72 @@ contract LimitOrder is BaseHook, ILimitOrder {
         SwapParams calldata params, 
         BalanceDelta delta, 
         bytes calldata hookData
-    )
-        internal virtual override returns (bytes4, int128)
-    {
+    ) internal virtual override returns (bytes4, int128) {
         return (bytes4(0), 0);
+    }
+
+    /// @inheritdoc ILimitOrder
+    function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
+        if (ActionLib.getAction() == ActionLib.PLACE_LMT_ORDER) {
+            (
+                address msgSender,
+                uint256 msgValue,
+                PoolKey memory poolKey,
+                int24 tickLower,
+                bool zeroForOne,
+                uint128 liquidity
+            ) = abi.decode(data, (address, uint256, PoolKey, int24, bool, uint128));
+
+            (BalanceDelta delta,) = poolManager.modifyLiquidity({
+                    key: poolKey,
+                    params: ModifyLiquidityParams({
+                        tickLower: tickLower,
+                        tickUpper: tickLower + poolKey.tickSpacing,
+                        liquidityDelta: int256(uint256(liquidity)), // safe cast 
+                        salt: bytes32(0)
+                    }),
+                    hookData: ""
+                }
+            );
+
+            int128 amount0 = delta.amount0();
+            int128 amount1 = delta.amount1();
+
+            // determine the currency and amount to pay for the limit order
+            Currency currency;
+            uint256 amountToPay;
+            // if the order is currency0 --> currency1, the amount0 should be negative and amount1 should be zero,
+            // and vice versa for currency1 --> currency0
+            if (zeroForOne) {
+                if (amount0 > 0 && amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
+                currency = poolKey.currency0;
+                amountToPay = (-amount0).toUint256();
+            } else {
+                if (amount1 > 0 && amount0 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
+                currency = poolKey.currency1;
+                amountToPay = (-amount1).toUint256();
+            }
+
+            // sync the pool
+            poolManager.sync(currency);
+
+            if (currency.isAddressZero()) {
+                if (msgValue < amountToPay) revert ErrorsLib.LimitOrder_InsufficientFunds();
+                
+                poolManager.settle{value: amountToPay}();
+
+                if (msgValue > amountToPay) {
+                    (bool success,) = payable(msgSender).call{value: msgValue - amountToPay}("");
+                    if (!success) revert ErrorsLib.LimitOrder_TransferFailed();
+                }
+            } else {
+                if (msgValue != 0) revert ErrorsLib.LimitOrder_EthWasSent();
+                IERC20(Currency.unwrap(currency)).transferFrom(msgSender, address(poolManager), amountToPay);
+                poolManager.settle();
+            }
+
+            return "";
+        } else if (ActionLib.getAction() == ActionLib.CANCEL_LMT_ORDER) {}
     }
 
     /* LIMIT ORDER FUNCTIONS */
@@ -114,10 +193,11 @@ contract LimitOrder is BaseHook, ILimitOrder {
         int24 tickLower, 
         bool zeroForOne,
         uint128 liquidity
-    ) external payable {
+    ) external payable setAction(ActionLib.PLACE_LMT_ORDER) {
         if (tickLower % poolKey.tickSpacing != 0) revert ErrorsLib.LimitOrder_InvalidTickLower();
         if (liquidity == 0) revert ErrorsLib.LimitOrder_MissingLiquidity();
 
+        // Calling `unlock()` first because it is reentrancy safe, and it is more efficient in case of revert.
         poolManager.unlock(
             abi.encode(
                 msg.sender,
@@ -129,7 +209,21 @@ contract LimitOrder is BaseHook, ILimitOrder {
             )
         );
 
+        bytes32 bucketId = getBucketId(poolKey.toId(), tickLower, zeroForOne);
+        uint256 slot = slots[bucketId];
+        
+        Bucket storage bucket = buckets[bucketId][slot];
+        bucket.liquidity += liquidity;
+        bucket.userLiquidity[msg.sender] += liquidity;
 
+        emit EventsLib.LimitOrder_Place(
+            msg.sender,
+            PoolId.unwrap(poolKey.toId()), 
+            slot,
+            tickLower, 
+            zeroForOne, 
+            liquidity
+        );
     }
 
     /// @inheritdoc ILimitOrder
@@ -137,7 +231,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
         PoolKey calldata poolKey, 
         int24 tickLower, 
         bool zeroForOne
-    ) external {}
+    ) external setAction(ActionLib.CANCEL_LMT_ORDER) {}
 
     /// @inheritdoc ILimitOrder
     function take(
@@ -147,10 +241,10 @@ contract LimitOrder is BaseHook, ILimitOrder {
         uint256 slot
     ) external {}
 
-    /* EXTERNAL GETTER FUNCTIONS */
+    /* HELPER FUNCTIONS */
 
     /// @inheritdoc ILimitOrder
-    function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) external pure returns (bytes32) {
+    function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) public pure returns (bytes32) {
         return keccak256(abi.encode(PoolId.unwrap(poolId), tick, zeroForOne));
     }
 }
