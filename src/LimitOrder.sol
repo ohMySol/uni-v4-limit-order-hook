@@ -68,9 +68,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
     /// @notice Constructor to initialize the hook with the pool manager
     /// @param _poolManager The address of the pool manager
-    constructor(address _poolManager) BaseHook(IPoolManager(_poolManager)) {
-        poolManager = IPoolManager(_poolManager);
-    }
+    constructor(address _poolManager) BaseHook(IPoolManager(_poolManager)) {}
 
     /// @notice Receive function to allow the hook to receive native token
     receive() external payable {}
@@ -98,7 +96,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
     }
 
     /// @inheritdoc BaseHook
-    /// @dev After pool initialization this hook will fetch the current tick of the pool and store it in the `ticks` mapping
+    /// @dev After pool initialization this hook will be triggered and it will fetch the current tick of the pool and store it in the `ticks` mapping
     function _afterInitialize(
         address sender, 
         PoolKey calldata poolKey, 
@@ -111,6 +109,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
     }
 
     /// @inheritdoc BaseHook
+    /// @dev After swap this hook will be triggered and it will remove liquidity from the processed `Bucket` if the order was filled.
     function _afterSwap(
         address sender, 
         PoolKey calldata key, 
@@ -118,8 +117,79 @@ contract LimitOrder is BaseHook, ILimitOrder {
         BalanceDelta delta, 
         bytes calldata hookData
     ) internal virtual override returns (bytes4, int128) {
-        return (bytes4(0), 0);
+        PoolId poolId = key.toId();
+        int24 previousTick = ticks[poolId];
+        (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
+
+        // Get the tick range for the previous tick (we store it in the `ticks` mapping) and current tick we get from the pool slot0.
+        // When swap happen it can move the tick to `tickUpper`. Later in this function we iterate over this range [tickLower - tickUpper],
+        // to find the buckets that should now be finalized and withdran.
+        (int24 tickLower, int24 tickUpper) = _getTickRange(previousTick, currentTick, key.tickSpacing);
+
+        if (tickUpper <= tickLower) {
+            return (this.afterSwap.selector, 0);
+        }
+
+        // The reason `!` is used is because it maps the trader (who will swap) swap direction --> to the user limit order 
+        // bucket direction.
+        // E.g: 1. Alice place a buy limit order with `zeroForOne = True` at a range of ticks [120 - 180].
+        // This means she want to sell token0 for token1, so she created a position with full liqudiity in token0.
+        // 2. The trader do a swap with `params.ZeroForOne = False` - means the swap is sell token1 for token0.
+        // This trade token token1 --> token0 will consume liquidity that Alice provided recently (her token0 position).
+        bool zeroForOne = !params.zeroForOne;
+
+        // Iterating over `tickSpacing` between [tickLower - tickUpper] and for each iteration:
+        // - load the bucket
+        // - check if liquidity exist in the bucket and it is not filled, and if yes - remove liquidity, mark the bucket as filled, advance the slot
+        while (tickLower < tickUpper) {
+            bytes32 bucketId = getBucketId(key.toId(), tickLower, zeroForOne);
+            uint256 slot = slots[bucketId];
+            Bucket storage bucket = buckets[bucketId][slot];
+
+            // Only process the current "generation" once.
+            if (!bucket.filled && bucket.liquidity > 0) {
+                // Decide whether the position is fully converted by the current price.
+                // If not fully converted, do nothing and let a future swap finish it.
+                //
+                // For a range [tickLower, tickLower + tickSpacing):
+                // - If selling token0 for token1 (zeroForOne == true), it's fully converted once price moves ABOVE the range.
+                // - If selling token1 for token0 (zeroForOne == false), it's fully converted once price moves BELOW the range.
+                bool fullyConverted = zeroForOne
+                    ? currentTick >= tickLower + key.tickSpacing
+                    : currentTick <= tickLower;
+
+                if (fullyConverted) {
+                    uint128 liquidityToRemove = bucket.liquidity;
+                    (uint256 amount0, uint256 amount1,,) = _removeLiquidity(
+                        key,
+                        tickLower,
+                        -int256(uint256(liquidityToRemove)) // safe cast
+                    );
+
+                    bucket.filled = true;
+                    bucket.amount0 += amount0;
+                    bucket.amount1 += amount1;
+                    slots[bucketId] = slot + 1;
+
+                    emit EventsLib.LimitOrder_Fill(
+                        PoolId.unwrap(poolId),
+                        slot,
+                        tickLower,
+                        zeroForOne,
+                        amount0,
+                        amount1
+                    );
+                }
+             }
+            tickLower += key.tickSpacing;
+        }
+
+        ticks[poolId] = currentTick;
+
+        return (this.afterSwap.selector, 0);
     }
+
+    /* CALLBACK FUNCTION */
 
     /// @inheritdoc ILimitOrder
     function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
@@ -127,17 +197,17 @@ contract LimitOrder is BaseHook, ILimitOrder {
             (
                 address msgSender,
                 uint256 msgValue,
-                PoolKey memory poolKey,
+                PoolKey memory key,
                 int24 tickLower,
                 bool zeroForOne,
                 uint128 liquidity
             ) = abi.decode(data, (address, uint256, PoolKey, int24, bool, uint128));
 
             (BalanceDelta delta,) = poolManager.modifyLiquidity({
-                    key: poolKey,
+                    key: key,
                     params: ModifyLiquidityParams({
                         tickLower: tickLower,
-                        tickUpper: tickLower + poolKey.tickSpacing,
+                        tickUpper: tickLower + key.tickSpacing,
                         liquidityDelta: int256(uint256(liquidity)), // safe cast 
                         salt: bytes32(0)
                     }),
@@ -155,11 +225,11 @@ contract LimitOrder is BaseHook, ILimitOrder {
             // and vice versa for currency1 --> currency0. This is because we are adding liquidity out of the current tick.
             if (zeroForOne) {
                 if (amount0 > 0 && amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
-                currency = poolKey.currency0;
+                currency = key.currency0;
                 amountToPay = (-amount0).toUint256();
             } else {
                 if (amount1 > 0 && amount0 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
-                currency = poolKey.currency1;
+                currency = key.currency1;
                 amountToPay = (-amount1).toUint256();
             }
 
@@ -184,7 +254,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
             return "";
         } else if (ActionLib.getAction() == ActionLib.CANCEL_LMT_ORDER) {
             (
-                PoolKey memory poolKey,
+                PoolKey memory key,
                 int24 tickLower,
                 uint128 liquidity
             ) = abi.decode(data, (PoolKey, int24, uint128));
@@ -194,7 +264,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
                 uint256 amount1, 
                 uint256 fee0, 
                 uint256 fee1
-            ) = _removeLiquidity(poolKey, tickLower, -int256(uint256(liquidity))); // safe cast
+            ) = _removeLiquidity(key, tickLower, -int256(uint256(liquidity))); // safe cast
 
             return abi.encode(amount0, amount1, fee0, fee1);
         }
@@ -206,12 +276,12 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
     /// @inheritdoc ILimitOrder
     function placeLimitOrder(
-        PoolKey calldata poolKey, 
+        PoolKey calldata key, 
         int24 tickLower, 
         bool zeroForOne,
         uint128 liquidity
     ) external payable setAction(ActionLib.PLACE_LMT_ORDER) {
-        if (tickLower % poolKey.tickSpacing != 0) revert ErrorsLib.LimitOrder_InvalidTickLower();
+        if (tickLower % key.tickSpacing != 0) revert ErrorsLib.LimitOrder_InvalidTickLower();
         if (liquidity == 0) revert ErrorsLib.LimitOrder_MissingLiquidity();
 
         // Calling `unlock()` first because it is reentrancy safe, and it is more efficient in case of revert.
@@ -219,14 +289,14 @@ contract LimitOrder is BaseHook, ILimitOrder {
             abi.encode(
                 msg.sender,
                 msg.value,
-                poolKey,
+                key,
                 tickLower,
                 zeroForOne,
                 liquidity
             )
         );
 
-        bytes32 bucketId = getBucketId(poolKey.toId(), tickLower, zeroForOne);
+        bytes32 bucketId = getBucketId(key.toId(), tickLower, zeroForOne);
         uint256 slot = slots[bucketId];
         
         Bucket storage bucket = buckets[bucketId][slot];
@@ -241,7 +311,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
         emit EventsLib.LimitOrder_Place(
             msg.sender,
-            PoolId.unwrap(poolKey.toId()), 
+            PoolId.unwrap(key.toId()), 
             slot,
             tickLower, 
             zeroForOne, 
@@ -251,25 +321,25 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
     /// @inheritdoc ILimitOrder
     function cancelLimitOrder(
-        PoolKey calldata poolKey, 
+        PoolKey calldata key, 
         int24 tickLower, 
         bool zeroForOne
     ) external setAction(ActionLib.CANCEL_LMT_ORDER) {
-        bytes32 bucketId = getBucketId(poolKey.toId(), tickLower, zeroForOne);
+        bytes32 bucketId = getBucketId(key.toId(), tickLower, zeroForOne);
         uint256 slot = slots[bucketId];
 
         Bucket storage bucket = buckets[bucketId][slot];
         if (bucket.filled) revert ErrorsLib.LimitOrder_BucketFilled();
         
         uint128 userLiquidity = bucket.userLiquidity[msg.sender];
-        if (userLiquidity == 0) revert ErrorsLib.LimitOrder_NoLiquidity();
+        if (userLiquidity == 0) revert ErrorsLib.LimitOrder_InsufficientUserLiquidity();
 
         bucket.liquidity -= userLiquidity;
         bucket.userLiquidity[msg.sender] = 0;
 
         bytes memory res = poolManager.unlock(
             abi.encode(
-                poolKey,
+                key,
                 tickLower,
                 userLiquidity
             )
@@ -297,15 +367,15 @@ contract LimitOrder is BaseHook, ILimitOrder {
         bucket.userOwed1[msg.sender] = 0;
         
         if (payout0 > 0) {
-            poolKey.currency0.transfer(msg.sender, payout0);
+            key.currency0.transfer(msg.sender, payout0);
         }
         if (payout1 > 0) {
-            poolKey.currency1.transfer(msg.sender, payout1);
+            key.currency1.transfer(msg.sender, payout1);
         }
 
         emit EventsLib.LimitOrder_Cancel(
             msg.sender,
-            PoolId.unwrap(poolKey.toId()),
+            PoolId.unwrap(key.toId()),
             slot,
             tickLower,
             zeroForOne
@@ -314,11 +384,40 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
     /// @inheritdoc ILimitOrder
     function take(
-        PoolKey calldata poolKey, 
+        PoolKey calldata key, 
         int24 tickLower, 
         bool zeroForOne,
         uint256 slot
-    ) external {}
+    ) external {
+        bytes32 bucketId = getBucketId(key.toId(), tickLower, zeroForOne);
+
+        Bucket storage bucket = buckets[bucketId][slot];
+        if (!bucket.filled) revert ErrorsLib.LimitOrder_BucketNotFilled();
+
+        uint128 liquidity = bucket.liquidity;
+        uint128 userLiquidity = bucket.userLiquidity[msg.sender];
+        if (userLiquidity == 0) revert ErrorsLib.LimitOrder_InsufficientUserLiquidity();
+
+        uint256 amount0 = (bucket.amount0 * userLiquidity) / liquidity;
+        uint256 amount1 = (bucket.amount1 * userLiquidity) / liquidity;
+
+        if (amount0 > 0) {
+            key.currency0.transfer(msg.sender, amount0);
+        }
+        if (amount1 > 0) {
+            key.currency1.transfer(msg.sender, amount1);
+        }
+
+        emit EventsLib.LimitOrder_Take(
+            msg.sender,
+            PoolId.unwrap(key.toId()),
+            slot,
+            tickLower,
+            zeroForOne,
+            amount0,
+            amount1
+        );
+    }
 
     /* HELPER FUNCTIONS */
 
@@ -343,7 +442,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
     }
 
     /// @notice Withdraw liquidity from the `PoolManager` to this hook contract and return the amount of tokens and fees.
-    /// @param poolKey The pool key
+    /// @param key The pool key
     /// @param tickLower The lower tick of the bucket
     /// @param liquidity The liquidity to remove
     /// @return amount0 The amount of token0
@@ -351,7 +450,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
     /// @return fee0 The fee of token0
     /// @return fee1 The fee of token1
     function _removeLiquidity(
-        PoolKey memory poolKey, 
+        PoolKey memory key, 
         int24 tickLower, 
         int256 liquidity
     ) internal returns (
@@ -361,10 +460,10 @@ contract LimitOrder is BaseHook, ILimitOrder {
         uint256 fee1
     ) {
         (BalanceDelta delta, BalanceDelta feeDelta) = poolManager.modifyLiquidity({
-            key: poolKey,
+            key: key,
             params: ModifyLiquidityParams({
                 tickLower: tickLower,
-                tickUpper: tickLower + poolKey.tickSpacing,
+                tickUpper: tickLower + key.tickSpacing,
                 liquidityDelta: liquidity,
                 salt: bytes32(0)
             }),
@@ -373,17 +472,53 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
         if (delta.amount0() > 0) {
             amount0 = uint256(uint128(delta.amount0()));
-            poolManager.take(poolKey.currency0, address(this), amount0);
+            poolManager.take(key.currency0, address(this), amount0);
         }
         if (delta.amount1() > 0) {
             amount1 = uint256(uint128(delta.amount1()));
-            poolManager.take(poolKey.currency1, address(this), amount1);
+            poolManager.take(key.currency1, address(this), amount1);
         }
         if (feeDelta.amount0() > 0) {
             fee0 = uint256(uint128(feeDelta.amount0()));
         }
         if (feeDelta.amount1() > 0) {
             fee1 = uint256(uint128(feeDelta.amount1()));
+        }
+    }
+
+    /// @notice Get the lower tick for a given tick and tick spacing
+    /// @param tick The tick
+    /// @param tickSpacing The tick spacing
+    /// @return The lower tick
+    function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        // Round towards negative infinity
+        if (tick < 0 && tick % tickSpacing != 0) compressed--;
+        return compressed * tickSpacing;
+    }
+
+    /// @notice Get the tick range for a given tick and tick spacing
+    /// @param tick0 The first tick
+    /// @param tick1 The second tick
+    /// @param tickSpacing The tick spacing
+    /// @return lower The lower tick
+    /// @return upper The upper tick
+    function _getTickRange(
+        int24 tick0, 
+        int24 tick1, 
+        int24 tickSpacing
+    ) internal pure returns (int24 lower, int24 upper) {
+        // Last lower tick
+        int24 l0 = _getTickLower(tick0, tickSpacing);
+        // Current lower tick
+        int24 l1 = _getTickLower(tick1, tickSpacing);
+
+        if (tick0 <= tick1) {
+            lower = l0;
+            upper = l1 - tickSpacing;
+        } else {
+            lower = l1 + tickSpacing;
+            upper = l0;
         }
     }
 }
