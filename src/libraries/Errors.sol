@@ -30,8 +30,11 @@ library ErrorsLib {
     error LimitOrder_EthWasSent();
 
     /// @notice Thrown when the user has no liquidity in the bucket
-    error LimitOrder_NoLiquidity();
+    error LimitOrder_InsufficientUserLiquidity();
 
     /// @notice Thrown when the bucket is filled
     error LimitOrder_BucketFilled();
+
+    /// @notice Thrown when the bucket is not filled
+    error LimitOrder_BucketNotFilled();
 }

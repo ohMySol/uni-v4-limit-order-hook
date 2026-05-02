@@ -35,4 +35,14 @@ library EventsLib {
         uint256 amount0,
         uint256 amount1
     );
+
+    /// @notice Emitted when a limit order bucket is filled (liquidity removed and proceeds recorded)
+    event LimitOrder_Fill(
+        bytes32 indexed poolId,
+        uint256 indexed slot,
+        int24 tickLower,
+        bool zeroForOne,
+        uint256 amount0,
+        uint256 amount1
+    );
 }
