@@ -109,7 +109,11 @@ contract LimitOrder is BaseHook, ILimitOrder {
     }
 
     /// @inheritdoc BaseHook
-    /// @dev After swap this hook will be triggered and it will remove liquidity from the processed `Bucket` if the order was filled.
+    /// @dev After swap this hook will be triggered and it will remove liquidity from the processed `Bucket`s if the order was filled.
+    /// In this hook contract, each limit order sits in one LP range [tickLower, tickLower + tickSpacing], and `placeLimitOrder` requires
+    /// `tickLower % tickSpacing == 0`. This means that the only `tickLower` identifiers that exist in `slots`/`buckets` are 0, 60, 120, ...,
+    /// not an arbtrary ticks like 122 or 247. As a result buckets only exist at ticks that are multiples of tickSpacing, so you floor (snap) the old and new pool ticks onto that grid, 
+    /// then step by tickSpacing. `_getTickLower` does that snap, and `_getTickRange` chooses which snapped keys fall between previous and current tick so each loop iteration hits a real bucket id.
     function _afterSwap(
         address sender, 
         PoolKey calldata key, 
@@ -122,8 +126,8 @@ contract LimitOrder is BaseHook, ILimitOrder {
         (, int24 currentTick,,) = StateLibrary.getSlot0(poolManager, poolId);
 
         // Get the tick range for the previous tick (we store it in the `ticks` mapping) and current tick we get from the pool slot0.
-        // When swap happen it can move the tick to `tickUpper`. Later in this function we iterate over this range [tickLower - tickUpper],
-        // to find the buckets that should now be finalized and withdran.
+        // When swap happens it can move the tick to `tickUpper`. Later in this function we iterate over this range [tickLower - tickUpper],
+        // to find the buckets that should now be finalized and withdrawn.
         (int24 tickLower, int24 tickUpper) = _getTickRange(previousTick, currentTick, key.tickSpacing);
 
         if (tickUpper <= tickLower) {
@@ -486,18 +490,20 @@ contract LimitOrder is BaseHook, ILimitOrder {
         }
     }
 
-    /// @notice Get the lower tick for a given tick and tick spacing
+    /// @notice Get the lower tick for a given tick and tick spacing. This function helps to align the boundary tick to correct lower value, 
+    /// e.g tick 182 will be aligned to 180.
     /// @param tick The tick
     /// @param tickSpacing The tick spacing
     /// @return The lower tick
     function _getTickLower(int24 tick, int24 tickSpacing) internal pure returns (int24) {
         int24 compressed = tick / tickSpacing;
-        // Round towards negative infinity
+        // Round towards negative infinity (truncate toward 0 for negatives)
         if (tick < 0 && tick % tickSpacing != 0) compressed--;
         return compressed * tickSpacing;
     }
 
-    /// @notice Get the tick range for a given tick and tick spacing
+    /// @notice Get the tick range for a given tick and tick spacing. It chooses `lower`/`upper` so `_afterSwap` 
+    /// visits only those band-start ticks spaced by `tickSpacing`.
     /// @param tick0 The first tick
     /// @param tick1 The second tick
     /// @param tickSpacing The tick spacing
@@ -513,10 +519,10 @@ contract LimitOrder is BaseHook, ILimitOrder {
         // Current lower tick
         int24 l1 = _getTickLower(tick1, tickSpacing);
 
-        if (tick0 <= tick1) {
+        if (tick0 <= tick1) { // tick moved up 
             lower = l0;
             upper = l1 - tickSpacing;
-        } else {
+        } else { // tick went down
             lower = l1 + tickSpacing;
             upper = l0;
         }
