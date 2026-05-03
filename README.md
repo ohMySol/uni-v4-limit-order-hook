@@ -12,9 +12,9 @@ A Uniswap V4 Hook that implements **on-chain limit orders** by representing each
 
 ## Quick project intro
 
-This repository contains a minimal “limit order” system implemented as a Uniswap V4 hook.
+This repository contains a minimal limit order system implemented as a Uniswap V4 hook.
 
-- **How an order is represented**: a user “places a limit order” by depositing liquidity into a single Uniswap V4 LP range \([`tickLower`, `tickLower + tickSpacing`)\).
+- **How an order is represented**: a user places a limit order by depositing liquidity into a single Uniswap V4 LP range \([`tickLower`, `tickLower + tickSpacing`)\).
 - **How an order is filled**: when swaps move the pool price across the relevant tick bands, the hook detects bands that became fully converted and withdraws that liquidity from the pool into the hook contract.
 - **How a user claims**: once a bucket is marked filled and token amounts are recorded, users call `take()` to withdraw their pro-rata share.
 
@@ -22,7 +22,7 @@ This repository contains a minimal “limit order” system implemented as a Uni
 
 ### Usual limit orders
 
-In traditional order books, a limit order is: “buy/sell at a specific price (or better).” The engine keeps your order in a queue and matches it when the market reaches your price.
+In traditional order books, a limit order is: “buy/sell at a specific price (or better)”. The engine keeps your order in a queue and matches it when the market reaches your price.
 That's how order book is working at Binance exchange for example.
 
 ### Why Uniswap V3 typically needed off-chain automation
@@ -31,7 +31,7 @@ Uniswap V3 is working on the same AMM mechanism as V4, but it doesn’t have pro
 You can approximate a limit order by providing one-sided concentrated liquidity outside the current price, but there is no built-in mechanism that:
 
 - detects crosses at the exact moments you care about
-- automatically finalizes your position and records amounts.
+- automatically finalizes your position and records amounts
 
 In practice, V3 limit orders usually required **off-chain keepers/bots** to watch price movement and execute management transactions (withdraw, rebalance, or close positions) at the right time.
 
@@ -41,11 +41,14 @@ Uniswap v4 introduces **Hooks**: programmable contracts that can run logic at sp
 
 That means you can implement a fully on-chain limit order finalization flow:
 
-- the pool calls your hook during swaps,
-- the hook determines which tick bands were crossed,
-- and the hook can withdraw/finalize liquidity for eligible “limit order buckets” within the same transaction context.
+- the pool calls your hook during swaps
+- the hook determines which tick bands were crossed
+- and the hook can withdraw/finalize liquidity for eligible “limit order buckets” within the same transaction context
 
 ## Project structure and architecture
+
+### Limit Order Simplified Workflow Diagram
+![Workflow](./diagrams/LimitOrderWorkflow.jpg)
 
 ### `LimitOrder.sol`
 
