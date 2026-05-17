@@ -444,6 +444,30 @@ contract LimitOrder is BaseHook, ILimitOrder {
 
     /* HELPER FUNCTIONS */
 
+    /// @notice Returns user-specific fields from a bucket that are not accessible via the auto-generated getter
+    /// @param bucketId The bucket identifier
+    /// @param slot The bucket slot (generation)
+    /// @param user The user address to query
+    function getUserBucketInfo(
+        bytes32 bucketId,
+        uint256 slot,
+        address user
+    ) external view returns (
+        uint128 userLiquidity,
+        uint256 userFee0,
+        uint256 userFee1,
+        uint256 userOwed0,
+        uint256 userOwed1
+    ) {
+        Bucket storage bucket = buckets[bucketId][slot];
+        
+        userLiquidity = bucket.userLiquidity[user];
+        userFee0 = bucket.userFee0[user];
+        userFee1 = bucket.userFee1[user];
+        userOwed0 = bucket.userOwed0[user];
+        userOwed1 = bucket.userOwed1[user];
+    }
+
     /// @inheritdoc ILimitOrder
     function getBucketId(PoolId poolId, int24 tick, bool zeroForOne) public pure returns (bytes32) {
         return keccak256(abi.encode(PoolId.unwrap(poolId), tick, zeroForOne));
