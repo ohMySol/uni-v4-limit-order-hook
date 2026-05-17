@@ -7,8 +7,12 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 /// @notice A bucket is a structure that holds limit orders of different users for a certain range of ticks
 /// @dev The bucket is identified by the `poolId`, `tick` (lower tick) and `zeroForOne` flag.
 /// A bucket is “filled” when the position (liquidity) has been converted into the output token for that order’s direction.
-///
-/// `userOwed0/1` is needed when a user deposits multiple times into the same bucket to avoid losing fees.
+/// 
+/// Why the fee accounting is complex and needs to be done in the hook:
+/// 1. All users in a bucket share one LP position owned by the hook. When any user removes liquidity, Uniswap V4 
+/// returns all accumulated fees for that entire position at once - not just their proportional share. The hook must split those fees 
+/// fairly among all depositors.
+/// 2. `userOwed0/1` is needed when a user deposits multiple times into the same bucket to avoid losing fees.
 ///
 /// @param filled Whether the liquidity in the bucket has been filled
 /// @param amount0 The amount of token0 in the bucket 
@@ -64,7 +68,7 @@ interface ILimitOrder {
 
     /// @notice Places a limit order for msg.sender 
     /// @dev Function calls `unlock()` on PoolManager which will do a callback to this contract into `unlockCallback()`,
-    /// where the liquidity will be placed in the specified price range (`tickLower` - `tickLower` + `poolKey.tickSpacing`).
+    /// where the liquidity will be placed in the specified price range ([`tickLower`, `tickLower` + `poolKey.tickSpacing`]).
     /// After callback is done, the bucket will be created and the limit order liquidity will be recorded in the bucket.
     /// 
     ///IMPORTANT:

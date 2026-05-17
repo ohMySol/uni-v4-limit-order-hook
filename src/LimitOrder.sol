@@ -109,7 +109,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
     }
 
     /// @inheritdoc BaseHook
-    /// @dev After swap this hook will be triggered and it will remove liquidity from the processed `Bucket`s if the order was filled.
+    /// @dev After swap this hook will be triggered and it will remove liquidity from the processed `Bucket`s` if the order was filled.
     /// In this hook contract, each limit order sits in one LP range [tickLower, tickLower + tickSpacing], and `placeLimitOrder` requires
     /// `tickLower % tickSpacing == 0`. This means that the only `tickLower` identifiers that exist in `slots`/`buckets` are 0, 60, 120, ...,
     /// not an arbtrary ticks like 122 or 247. As a result buckets only exist at ticks that are multiples of tickSpacing, so you floor (snap) the old and new pool ticks onto that grid, 
@@ -130,7 +130,12 @@ contract LimitOrder is BaseHook, ILimitOrder {
         // to find the buckets that should now be finalized and withdrawn.
         (int24 tickLower, int24 tickUpper) = _getTickRange(previousTick, currentTick, key.tickSpacing);
 
-        if (tickUpper <= tickLower) {
+        // The early return happens when that computed iteration range is empty — meaning 
+        // the swap didn't fully cross any tickSpacing-aligned band.
+        // E.g. tickSpacing = 60, previousTick = 130, currentTick = 150. 
+        // after snapping l0 = 120, l1 = 120 ; tick moved up --> lower = l0 = 120, upper = l1 - 60 = 60
+        // tickUpper(60) < tickLower(120) --> early return because no buckets were fully crossed.
+        if (tickUpper < tickLower) {
             return (this.afterSwap.selector, 0);
         }
 
@@ -139,13 +144,16 @@ contract LimitOrder is BaseHook, ILimitOrder {
         // E.g: 1. Alice place a buy limit order with `zeroForOne = True` at a range of ticks [120 - 180].
         // This means she want to sell token0 for token1, so she created a position with full liqudiity in token0.
         // 2. The trader do a swap with `params.ZeroForOne = False` - means the swap is sell token1 for token0.
-        // This trade token token1 --> token0 will consume liquidity that Alice provided recently (her token0 position).
+        // This trade token1 --> token0 will consume liquidity that Alice provided recently (her token0 position).
         bool zeroForOne = !params.zeroForOne;
 
         // Iterating over `tickSpacing` between [tickLower - tickUpper] and for each iteration:
         // - load the bucket
-        // - check if liquidity exist in the bucket and it is not filled, and if yes - remove liquidity, mark the bucket as filled, advance the slot
-        while (tickLower < tickUpper) {
+        // - check if liquidity exist in the bucket and it is not filled
+        // - if liquidity exists - remove liquidity
+        // - mark the bucket as filled 
+        // - advance the slot
+        while (tickLower <= tickUpper) {
             bytes32 bucketId = getBucketId(key.toId(), tickLower, zeroForOne);
             uint256 slot = slots[bucketId];
             Bucket storage bucket = buckets[bucketId][slot];
@@ -154,6 +162,8 @@ contract LimitOrder is BaseHook, ILimitOrder {
             if (!bucket.filled && bucket.liquidity > 0) {
                 // Decide whether the position is fully converted by the current price.
                 // If not fully converted, do nothing and let a future swap finish it.
+                // This prevents premature settlement of the order and allows users to get 
+                // the full amount of tokens they expected when they placed the order.
                 //
                 // For a range [tickLower, tickLower + tickSpacing):
                 // - If selling token0 for token1 (zeroForOne == true), it's fully converted once price moves ABOVE the range.
@@ -225,9 +235,16 @@ contract LimitOrder is BaseHook, ILimitOrder {
             // determine the currency and amount to pay for the limit order
             Currency currency;
             uint256 amountToPay;
-            // if the order is currency0 --> currency1, the amount0 should be negative and amount1 should be zero,
+            // In Uniswap V4, BalanceDelta from modifyLiquidity is from the caller's perspective:
+            // - Negative = caller owes tokens to the pool (outflow)
+            // - Positive = pool owes tokens to the caller (inflow)
+            // If the order is currency0 --> currency1, the amount0 should be negative and amount1 should be zero,
             // and vice versa for currency1 --> currency0. This is because we are adding liquidity out of the current tick.
             if (zeroForOne) {
+                // `amount0 > 0` the pool is sending token0 back to the caller. This only happens if the tick range is below the current tick (invalid order).
+                // `amount1 != 0` means that token1 is involved and the tick range already includes the current tick, so the order is already partially filled, 
+                // which is not allowed when placing a new limit order.
+                // Both cases mean the tick range crossed the current tick, so the order isn't a valid pending limit order.
                 if (amount0 > 0 && amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
                 currency = key.currency0;
                 amountToPay = (-amount0).toUint256();
@@ -401,6 +418,8 @@ contract LimitOrder is BaseHook, ILimitOrder {
         uint128 liquidity = bucket.liquidity;
         uint128 userLiquidity = bucket.userLiquidity[msg.sender];
         if (userLiquidity == 0) revert ErrorsLib.LimitOrder_InsufficientUserLiquidity();
+
+        bucket.userLiquidity[msg.sender] = 0;
 
         uint256 amount0 = (bucket.amount0 * userLiquidity) / liquidity;
         uint256 amount1 = (bucket.amount1 * userLiquidity) / liquidity;
