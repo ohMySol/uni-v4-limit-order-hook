@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+pragma solidity ^0.8.0;
 
 import {BaseHook} from "v4-hooks-public/src/base/BaseHook.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
