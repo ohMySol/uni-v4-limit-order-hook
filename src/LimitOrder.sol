@@ -185,7 +185,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
                     bucket.amount1 += amount1;
                     slots[bucketId] = slot + 1;
 
-                    emit EventsLib.LimitOrder_Fill(
+                    emit EventsLib.LimitOrder_Filled(
                         PoolId.unwrap(poolId),
                         slot,
                         tickLower,
@@ -241,15 +241,15 @@ contract LimitOrder is BaseHook, ILimitOrder {
             // If the order is currency0 --> currency1, the amount0 should be negative and amount1 should be zero,
             // and vice versa for currency1 --> currency0. This is because we are adding liquidity out of the current tick.
             if (zeroForOne) {
-                // `amount0 > 0` the pool is sending token0 back to the caller. This only happens if the tick range is below the current tick (invalid order).
-                // `amount1 != 0` means that token1 is involved and the tick range already includes the current tick, so the order is already partially filled, 
-                // which is not allowed when placing a new limit order.
-                // Both cases mean the tick range crossed the current tick, so the order isn't a valid pending limit order.
-                if (amount0 > 0 && amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
+                // For a zeroForOne order (sell token0), the tick range must be entirely above current tick.
+                // If token1 is involved (amount1 != 0), the range spans or is below current tick — which is invalid.
+                if (amount1 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
                 currency = key.currency0;
                 amountToPay = (-amount0).toUint256();
             } else {
-                if (amount1 > 0 && amount0 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
+                // For a oneForZero order (sell token1), the tick range must be entirely below current tick.
+                // If token0 is involved (amount0 != 0), the range spans or is above current tick — which is invalid.
+                if (amount0 != 0) revert ErrorsLib.LimitOrder_TickCrossed();
                 currency = key.currency1;
                 amountToPay = (-amount1).toUint256();
             }
@@ -330,7 +330,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
         bucket.userFee0[msg.sender] = bucket.feePerLiquidity0;
         bucket.userFee1[msg.sender] = bucket.feePerLiquidity1;
 
-        emit EventsLib.LimitOrder_Place(
+        emit EventsLib.LimitOrder_Placed(
             msg.sender,
             PoolId.unwrap(key.toId()), 
             slot,
@@ -394,7 +394,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
             key.currency1.transfer(msg.sender, payout1);
         }
 
-        emit EventsLib.LimitOrder_Cancel(
+        emit EventsLib.LimitOrder_Cancelled(
             msg.sender,
             PoolId.unwrap(key.toId()),
             slot,
@@ -431,7 +431,7 @@ contract LimitOrder is BaseHook, ILimitOrder {
             key.currency1.transfer(msg.sender, amount1);
         }
 
-        emit EventsLib.LimitOrder_Take(
+        emit EventsLib.LimitOrder_Taken(
             msg.sender,
             PoolId.unwrap(key.toId()),
             slot,

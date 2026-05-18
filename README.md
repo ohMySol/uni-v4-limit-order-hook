@@ -1,6 +1,6 @@
 ## Limit Order Hook
 
-A Uniswap V4 Hook that implements **on-chain limit orders** by representing each order as concentrated liquidity in a single tick band \([`tickLower`, `tickLower + tickSpacing`)\) and finalizing filled bands in `afterSwap`.
+A Uniswap V4 Hook that implements **on-chain limit orders** by representing each order as concentrated liquidity in a single tick band \[`tickLower`, `tickLower + tickSpacing`] and finalizing filled bands in `afterSwap`.
 
 ### Navigation
 

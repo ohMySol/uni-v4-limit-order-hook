@@ -23,6 +23,7 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 
 import {LimitOrder} from "../src/LimitOrder.sol";
 import {EventsLib} from "../src/libraries/Events.sol";
+import {ErrorsLib} from "../src/libraries/Errors.sol";
 
 contract LimitOrderTest is Test, Deployers {
     using StateLibrary for IPoolManager;
@@ -151,7 +152,7 @@ contract LimitOrderTest is Test, Deployers {
 
         // Verify event is emitted with correct params before the call
         vm.expectEmit(true, true, true, true, address(hook));
-        emit EventsLib.LimitOrder_Place(alice, PoolId.unwrap(poolId), slot, tickLower, true, liquidity);
+        emit EventsLib.LimitOrder_Placed(alice, PoolId.unwrap(poolId), slot, tickLower, true, liquidity);
 
         vm.prank(alice);
         hook.placeLimitOrder(poolKey, tickLower, true, liquidity);
@@ -170,6 +171,90 @@ contract LimitOrderTest is Test, Deployers {
 
         // 4. Alice's token0 balance decreased (tokens moved to the pool)
         uint256 aliceToken0After = token0.balanceOf(alice);
-        assertLt(aliceToken0After, aliceToken0Before);
+        assertEq(aliceToken0After, aliceToken0Before - 1e18);
+    }
+
+    function test_Set_Action_Resets_After_Call() public {
+        int24 tickLower1 = 60;
+        int24 tickLower2 = 120;
+        uint128 liq1 = getLiquidityForAmount(tickLower1, tickLower1 + poolKey.tickSpacing, 1e18, 0);
+        uint128 liq2 = getLiquidityForAmount(tickLower2, tickLower2 + poolKey.tickSpacing, 1e18, 0);
+
+        vm.startPrank(alice);
+        hook.placeLimitOrder(poolKey, tickLower1, true, liq1); // sets action = 1, resets to 0 after successful execution
+        hook.placeLimitOrder(poolKey, tickLower2, true, liq2); // would revert if action wasn't reset
+        vm.stopPrank();
+    }
+
+    function test_PlaceLimitOrder_Revert_If_TickLower_Is_Not_Multiple_Of_TickSpacing() public {
+        int24 tickLower = 61;
+        int24 tickUpper = tickLower + 2; // 61 - not a multiple of tick spacing (60)
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 1e18, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(ErrorsLib.LimitOrder_InvalidTickLower.selector);
+        hook.placeLimitOrder(poolKey, tickLower, true, liquidity);
+    }
+
+    function test_PlaceLimitOrder_Revert_If_Provided_Liquidity_Is_Zero() public {
+        int24 tickLower = 60;
+
+        vm.expectRevert(ErrorsLib.LimitOrder_MissingLiquidity.selector);
+        hook.placeLimitOrder(poolKey, tickLower, true, 0);
+    }
+
+    // zeroForOne = true means selling token0 for token1. Valid range is ABOVE current tick (0).
+    // Placing at tickLower = -60 puts the range [-60, 0] BELOW current tick --> token1 is involved --> TickCrossed.
+    function test_PlaceLimitOrder_ZeroForOne_Reverts_TickCrossed_When_Range_Below_Current_Tick() public {
+        int24 tickLower = -60; // range [-60, 0] is below current tick 0
+        int24 tickUpper = tickLower + poolKey.tickSpacing; // 0
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 0, 1e18);
+
+        vm.prank(alice);
+        vm.expectRevert(ErrorsLib.LimitOrder_TickCrossed.selector);
+        hook.placeLimitOrder(poolKey, tickLower, true, liquidity);
+    }
+
+    // zeroForOne = false means selling token1 for token0. Valid range is BELOW current tick (0).
+    // Placing at tickLower=60 puts the range [60, 120] ABOVE current tick --> token0 is involved --> TickCrossed.
+    function test_PlaceLimitOrder_OneForZero_Reverts_TickCrossed_When_Range_Above_Current_Tick() public {
+        int24 tickLower = 60; // range [60, 120] is above current tick 0
+        int24 tickUpper = tickLower + poolKey.tickSpacing; // 120
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 1e18, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(ErrorsLib.LimitOrder_TickCrossed.selector);
+        hook.placeLimitOrder(poolKey, tickLower, false, liquidity);
+    }
+
+    // Sending ETH with an ERC20-ERC20 order must revert — no ETH should be sent for token-only pools.
+    function test_PlaceLimitOrder_Reverts_When_EthSentForERC20() public {
+        int24 tickLower = 60;
+        int24 tickUpper = tickLower + poolKey.tickSpacing; // 120   
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 1e18, 0);
+
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert(ErrorsLib.LimitOrder_EthWasSent.selector);
+        hook.placeLimitOrder{value: 1 ether}(poolKey, tickLower, true, liquidity);
+    }
+
+    // Sending less ETH than required for a native-token (ETH/ERC20) pool must revert.
+    function test_PlaceLimitOrder_Reverts_When_InsufficientNativeTokenSent() public {
+        // Set up a native token (ETH / token1) pool using the same hook.
+        PoolKey memory nativeKey;
+        (nativeKey,) = initPool(CurrencyLibrary.ADDRESS_ZERO, token1, hook, 3000, SQRT_PRICE_1_1);
+
+        // Range [60, 120] is above current tick 0 --> position is 100% ETH (currency0).
+        int24 tickLower = 60;
+        int24 tickUpper = tickLower + nativeKey.tickSpacing; // 120
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 1e18, 0);
+
+        // Approve token1 for the hook (needed for alice's existing approvals to extend to this pool).
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert(ErrorsLib.LimitOrder_InsufficientFunds.selector);
+        // 1 wei sent, but ~1e18 ETH required
+        hook.placeLimitOrder{value: 1 wei}(nativeKey, tickLower, true, liquidity);
     }
 }

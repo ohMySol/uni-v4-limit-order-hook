@@ -7,7 +7,7 @@ pragma solidity ^0.8.0;
 /// `LimitOrder_{EventName}`.
 library EventsLib {
     /// @notice Emitted when a limit order is placed
-    event LimitOrder_Place(
+    event LimitOrder_Placed(
         address indexed sender,
         bytes32 indexed poolId,
         uint256 indexed slot,
@@ -17,7 +17,7 @@ library EventsLib {
     );
 
     /// @notice Emitted when a limit order is cancelled
-    event LimitOrder_Cancel(
+    event LimitOrder_Cancelled(
         address indexed sender,
         bytes32 indexed poolId,
         uint256 indexed slot,
@@ -26,7 +26,7 @@ library EventsLib {
     );
 
     /// @notice Emitted when swapped tokens from limit order are taken
-    event LimitOrder_Take(
+    event LimitOrder_Taken(
         address indexed sender,
         bytes32 indexed poolId,
         uint256 indexed slot,
@@ -37,7 +37,7 @@ library EventsLib {
     );
 
     /// @notice Emitted when a limit order bucket is filled (liquidity removed and proceeds recorded)
-    event LimitOrder_Fill(
+    event LimitOrder_Filled(
         bytes32 indexed poolId,
         uint256 indexed slot,
         int24 tickLower,
