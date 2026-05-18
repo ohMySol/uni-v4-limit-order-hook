@@ -257,4 +257,46 @@ contract LimitOrderTest is Test, Deployers {
         // 1 wei sent, but ~1e18 ETH required
         hook.placeLimitOrder{value: 1 wei}(nativeKey, tickLower, true, liquidity);
     }
+
+    /* CANCEL LIMIT ORDER */
+
+    function test_Order_Cancelled_Successfully() public {
+        int24 tickLower = 60; // range [60, 120] is above current tick 0
+        int24 tickUpper = tickLower + poolKey.tickSpacing; // 120
+        uint128 liquidity = getLiquidityForAmount(tickLower, tickUpper, 1e18, 0); // corresponds to 1 token0
+
+        // 1. Place limit order above the current price - selling token0 for token1
+        uint256 aliceBalanceBeforePlacingOrder = token0.balanceOf(alice);
+
+        vm.prank(alice);
+        hook.placeLimitOrder(poolKey, tickLower, true, liquidity);
+        // Balance should be decreased by 1 token (1e18)
+        uint256 aliceBalanceAfterPlacingOrder = token0.balanceOf(alice);
+        assertEq(aliceBalanceAfterPlacingOrder, aliceBalanceBeforePlacingOrder - 1e18);
+
+        PoolId poolId = poolKey.toId();
+        bytes32 bucketId = hook.getBucketId(poolId, tickLower, true);
+        uint256 slot = hook.slots(bucketId); // 0 — first generation of this bucket
+
+        // 2. Cancel the order
+        // Verify event is emitted with correct params before the call
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit EventsLib.LimitOrder_Cancelled(alice, PoolId.unwrap(poolId), slot, tickLower, true);
+
+        uint256 aliceBalanceBeforeCancelOrder = token0.balanceOf(alice);
+
+        vm.prank(alice);
+        hook.cancelLimitOrder(poolKey, tickLower, true);
+
+        uint256 aliceBalanceAfterCancelOrder = token0.balanceOf(alice);
+        // Balance should be back to what it was before placing the order (1e18 back to Alice)
+        assertApproxEqAbs(aliceBalanceAfterCancelOrder, aliceBalanceBeforeCancelOrder + 1e18, 1);
+
+        // 3. Verify Alice liquidity in the bucket is removed and tokens returned to Alice + bucket liquidity reduced
+        (uint128 userLiquidity,,,,) = hook.getUserBucketInfo(bucketId, slot, alice);
+        assertEq(userLiquidity, 0);
+        (bool filled,,,,, uint128 bucketLiquidityAfter) = hook.buckets(bucketId, slot);
+        assertFalse(filled);
+        assertEq(bucketLiquidityAfter, 0);
+    }
 }
